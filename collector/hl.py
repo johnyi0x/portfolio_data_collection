@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
 from pathlib import Path
 from typing import Any
 
 import requests
 
+from .rate_limit import IpGuard, info_weight
 from .wal import atomic_write_json, read_json
 
 LEADERBOARD_URLS = (
@@ -86,32 +88,36 @@ class HyperliquidPublic:
         gap_s: float,
         retries: int,
         logger: logging.Logger,
+        ip_reserve: int = 50,
     ) -> None:
         self.info_url = info_url
         self.timeout_s = timeout_s
         self.leaderboard_timeout_s = leaderboard_timeout_s
-        self.gap_s = gap_s
         self.retries = retries
         self.log = logger
-        self._last_call = 0.0
+        self.guard = IpGuard(min_interval_s=gap_s, reserve=ip_reserve, logger=logger)
         self.session = requests.Session()
-
-    def _pace(self) -> None:
-        wait = self.gap_s - (time.time() - self._last_call)
-        if wait > 0:
-            time.sleep(wait)
-        self._last_call = time.time()
+        self.session.headers.update(
+            {
+                "User-Agent": "bagindex-collector/0.1",
+                "Accept": "application/json",
+            }
+        )
 
     def _sleep_backoff(self, attempt: int, retry_after: float | None = None) -> None:
         if retry_after and retry_after > 0:
-            time.sleep(min(30.0, retry_after))
+            time.sleep(min(30.0, retry_after) + random.uniform(0, 0.3))
             return
-        time.sleep(min(20.0, 2.0 * (2 ** max(0, attempt))))
+        delay = min(20.0, 1.0 * (2 ** max(0, attempt)) + random.uniform(0, 0.3))
+        time.sleep(delay)
 
-    def post_info(self, body: dict[str, Any]) -> Any:
+    def post_info(self, body: dict[str, Any], *, retries: int | None = None) -> Any:
         last_err: Exception | None = None
-        for attempt in range(self.retries):
-            self._pace()
+        attempts = self.retries if retries is None else max(1, retries)
+        req_type = str(body.get("type") or "")
+        weight = info_weight(req_type)
+        for attempt in range(attempts):
+            self.guard.wait(weight)
             try:
                 resp = self.session.post(
                     self.info_url,
@@ -124,22 +130,40 @@ class HyperliquidPublic:
                         ra = float(resp.headers.get("Retry-After") or 0)
                     except (TypeError, ValueError):
                         ra = None
-                    self.log.warning("HL 429 on %s — backoff", body.get("type"))
+                    self.log.warning("HL 429 on %s — backoff", req_type)
                     self._sleep_backoff(attempt, ra)
                     last_err = RuntimeError("429")
                     continue
                 if resp.status_code >= 500:
-                    self.log.warning("HL %s on %s", resp.status_code, body.get("type"))
-                    self._sleep_backoff(attempt)
+                    self.log.warning("HL %s on %s", resp.status_code, req_type)
                     last_err = RuntimeError(f"HTTP {resp.status_code}")
+                    if attempt + 1 >= attempts:
+                        break
+                    self._sleep_backoff(attempt)
                     continue
                 resp.raise_for_status()
                 return resp.json()
             except (requests.RequestException, ValueError) as exc:
                 last_err = exc
-                self.log.warning("HL info error (%s/%s): %s", attempt + 1, self.retries, exc)
+                self.log.warning(
+                    "HL info error (%s/%s): %s", attempt + 1, attempts, exc
+                )
                 self._sleep_backoff(attempt)
         raise RuntimeError(f"HL info failed after retries: {last_err}")
+
+    def fetch_perp_dex_names(self) -> list[str]:
+        raw = self.post_info({"type": "perpDexs"})
+        names: list[str] = []
+        if not isinstance(raw, list):
+            return names
+        for item in raw:
+            if isinstance(item, dict):
+                name = item.get("name")
+                if name:
+                    names.append(str(name))
+            elif item:
+                names.append(str(item))
+        return names
 
     def fetch_leaderboard_payload(self) -> Any:
         last_err: Exception | None = None
@@ -405,16 +429,15 @@ def fingerprint(positions: list[dict[str, Any]]) -> str:
     return "|".join(parts)
 
 
-def snapshot_wallet(client: HyperliquidPublic, address: str, now: float) -> dict[str, Any]:
+def snapshot_wallet(
+    client: HyperliquidPublic,
+    address: str,
+    now: float,
+    extra_dexes: list[str] | None = None,
+) -> dict[str, Any]:
     addr = address.lower()
     try:
-        raw = client.post_info(
-            {"type": "clearinghouseState", "user": addr, "dex": "ALL_DEXES"}
-        )
-        states = iter_clearinghouse_states(raw)
-        if not states:
-            raw = client.post_info({"type": "clearinghouseState", "user": addr})
-            states = iter_clearinghouse_states(raw)
+        states = fetch_user_states(client, addr, extra_dexes or [])
         equity = account_value_from_states(states)
         positions = parse_positions(states, equity)
         return {
@@ -436,3 +459,39 @@ def snapshot_wallet(client: HyperliquidPublic, address: str, now: float) -> dict
             "ok": False,
             "error": str(exc)[:300],
         }
+
+
+def fetch_user_states(
+    client: HyperliquidPublic,
+    address: str,
+    extra_dexes: list[str],
+) -> list[tuple[str, dict[str, Any]]]:
+    try:
+        raw = client.post_info(
+            {"type": "clearinghouseState", "user": address, "dex": "ALL_DEXES"},
+            retries=1,
+        )
+        states = iter_clearinghouse_states(raw)
+        if states:
+            return states
+    except Exception as exc:
+        client.log.warning("ALL_DEXES failed %s — per-dex fallback: %s", address[:10], exc)
+
+    states: list[tuple[str, dict[str, Any]]] = []
+    seen: set[int] = set()
+    dexes = [""] + [d for d in extra_dexes if d]
+    for dex in dexes:
+        body: dict[str, Any] = {"type": "clearinghouseState", "user": address}
+        if dex:
+            body["dex"] = dex
+        try:
+            raw = client.post_info(body, retries=2)
+            for item in iter_clearinghouse_states(raw, default_dex=dex):
+                sid = id(item[1])
+                if sid in seen:
+                    continue
+                seen.add(sid)
+                states.append(item)
+        except Exception as exc:
+            client.log.warning("snapshot dex=%r %s: %s", dex or "native", address[:10], exc)
+    return states

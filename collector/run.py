@@ -67,10 +67,21 @@ def gather_cycle(
         refreshed,
     )
 
+    extra_dexes: list[str] = []
+    if cfg.dex_scope != "native":
+        try:
+            extra_dexes = client.fetch_perp_dex_names()
+            log.info("HIP-3 dexes for fallback: %s", extra_dexes or "(none)")
+        except Exception as exc:
+            log.warning("Could not list perp dexes — native + xyz fallback: %s", exc)
+            extra_dexes = ["xyz"]
+
     books: list[dict[str, Any]] = []
     for i, m in enumerate(members, start=1):
         snap_now = time.time()
-        book = snapshot_wallet(client, m["address"], snap_now)
+        book = snapshot_wallet(
+            client, m["address"], snap_now, extra_dexes=extra_dexes
+        )
         books.append(book)
         if not book["ok"]:
             log.warning("Snapshot fail %s %s — %s", i, m["address"][:10], book["error"])
@@ -160,6 +171,7 @@ def run_forever(cfg: Settings | None = None) -> None:
         gap_s=cfg.request_gap_s,
         retries=cfg.snapshot_retries,
         logger=log,
+        ip_reserve=cfg.ip_weight_reserve,
     )
     log.info(
         "Collector start venue=%s basket=%s window=%s every=%.1fh leaderboard=%.1fh",

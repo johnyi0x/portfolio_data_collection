@@ -45,6 +45,7 @@ class Settings:
     min_coverage: float
     request_timeout_s: float
     leaderboard_timeout_s: float
+    ip_weight_reserve: int
 
     @property
     def cohort(self) -> str:
@@ -73,9 +74,10 @@ def load_settings() -> Settings:
         leaderboard_refresh_hours=max(1.0, _f("LEADERBOARD_REFRESH_HOURS", 1.0)),
         dex_scope=_s("DEX_SCOPE", "include").lower(),
         min_notional_usd=max(0.0, _f("MAJORITY_MIN_NOTIONAL_USD", 50.0)),
-        request_gap_s=max(0.05, _f("REQUEST_GAP_S", 0.15)),
-        snapshot_retries=max(1, _i("SNAPSHOT_RETRIES", 3)),
+        request_gap_s=max(0.05, _f("REQUEST_GAP_S", 0.12)),
+        snapshot_retries=max(1, _i("SNAPSHOT_RETRIES", 2)),
         min_coverage=min(1.0, max(0.0, _f("MIN_COVERAGE", 0.70))),
         request_timeout_s=_f("HL_REQUEST_TIMEOUT_S", 30.0),
         leaderboard_timeout_s=_f("HL_LEADERBOARD_TIMEOUT_S", 90.0),
+        ip_weight_reserve=max(0, _i("HL_IP_WEIGHT_RESERVE", 50)),
     )
