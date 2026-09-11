@@ -46,6 +46,7 @@ class Settings:
     request_timeout_s: float
     leaderboard_timeout_s: float
     ip_weight_reserve: int
+    dex_fallback: str
 
     @property
     def cohort(self) -> str:
@@ -80,4 +81,5 @@ def load_settings() -> Settings:
         request_timeout_s=_f("HL_REQUEST_TIMEOUT_S", 30.0),
         leaderboard_timeout_s=_f("HL_LEADERBOARD_TIMEOUT_S", 90.0),
         ip_weight_reserve=max(0, _i("HL_IP_WEIGHT_RESERVE", 50)),
+        dex_fallback=_s("DEX_FALLBACK", "xyz"),
     )

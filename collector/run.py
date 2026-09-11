@@ -69,12 +69,9 @@ def gather_cycle(
 
     extra_dexes: list[str] = []
     if cfg.dex_scope != "native":
-        try:
-            extra_dexes = client.fetch_perp_dex_names()
-            log.info("HIP-3 dexes for fallback: %s", extra_dexes or "(none)")
-        except Exception as exc:
-            log.warning("Could not list perp dexes — native + xyz fallback: %s", exc)
-            extra_dexes = ["xyz"]
+        extra_dexes = [d for d in cfg.dex_fallback.split(",") if d.strip()]
+        extra_dexes = [d.strip() for d in extra_dexes]
+    client.all_dexes_ok = True
 
     books: list[dict[str, Any]] = []
     for i, m in enumerate(members, start=1):

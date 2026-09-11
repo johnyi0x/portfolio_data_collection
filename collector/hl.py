@@ -103,6 +103,7 @@ class HyperliquidPublic:
                 "Accept": "application/json",
             }
         )
+        self.all_dexes_ok = True
 
     def _sleep_backoff(self, attempt: int, retry_after: float | None = None) -> None:
         if retry_after and retry_after > 0:
@@ -466,16 +467,22 @@ def fetch_user_states(
     address: str,
     extra_dexes: list[str],
 ) -> list[tuple[str, dict[str, Any]]]:
-    try:
-        raw = client.post_info(
-            {"type": "clearinghouseState", "user": address, "dex": "ALL_DEXES"},
-            retries=1,
-        )
-        states = iter_clearinghouse_states(raw)
-        if states:
-            return states
-    except Exception as exc:
-        client.log.warning("ALL_DEXES failed %s — per-dex fallback: %s", address[:10], exc)
+    if client.all_dexes_ok:
+        try:
+            raw = client.post_info(
+                {"type": "clearinghouseState", "user": address, "dex": "ALL_DEXES"},
+                retries=1,
+            )
+            states = iter_clearinghouse_states(raw)
+            if states:
+                return states
+        except Exception as exc:
+            client.all_dexes_ok = False
+            client.log.warning(
+                "ALL_DEXES unavailable (%s) — native+%s for the rest of this hour",
+                exc,
+                ",".join(extra_dexes) or "none",
+            )
 
     states: list[tuple[str, dict[str, Any]]] = []
     seen: set[int] = set()
@@ -485,7 +492,7 @@ def fetch_user_states(
         if dex:
             body["dex"] = dex
         try:
-            raw = client.post_info(body, retries=2)
+            raw = client.post_info(body, retries=1)
             for item in iter_clearinghouse_states(raw, default_dex=dex):
                 sid = id(item[1])
                 if sid in seen:
