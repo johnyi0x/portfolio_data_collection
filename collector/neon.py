@@ -489,7 +489,7 @@ ON CONFLICT (cycle_ts, venue, coin) DO UPDATE SET
     ohlc_closed = coin_prices.ohlc_closed OR EXCLUDED.ohlc_closed,
     delisted = coin_prices.delisted OR EXCLUDED.delisted,
     source = CASE
-        WHEN coin_prices.source LIKE '%ctx%' THEN coin_prices.source
+        WHEN coin_prices.source LIKE '%%ctx%%' THEN coin_prices.source
         ELSE COALESCE(EXCLUDED.source, coin_prices.source)
     END,
     error = CASE
