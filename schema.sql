@@ -86,3 +86,34 @@ CREATE TABLE IF NOT EXISTS meta_index (
     rank            integer     NOT NULL,
     PRIMARY KEY (cycle_ts, venue, coin)
 );
+
+CREATE TABLE IF NOT EXISTS coin_prices (
+    cycle_ts        timestamptz NOT NULL,
+    venue           text        NOT NULL DEFAULT 'hyperliquid',
+    coin            text        NOT NULL,
+    mark_px         numeric,
+    mid_px          numeric,
+    oracle_px       numeric,
+    funding         numeric,
+    open_interest   numeric,
+    prev_day_px     numeric,
+    day_ntl_vlm     numeric,
+    premium         numeric,
+    ohlc_open       numeric,
+    ohlc_high       numeric,
+    ohlc_low        numeric,
+    ohlc_close      numeric,
+    ohlc_volume     numeric,
+    ohlc_trades     integer,
+    ohlc_start_ts   timestamptz,
+    ohlc_closed     boolean     NOT NULL DEFAULT false,
+    delisted        boolean     NOT NULL DEFAULT false,
+    source          text,
+    error           text,
+    fetched_at      timestamptz NOT NULL,
+    PRIMARY KEY (cycle_ts, venue, coin)
+);
+
+CREATE INDEX IF NOT EXISTS coin_prices_coin_idx
+    ON coin_prices (venue, coin, cycle_ts DESC);
+

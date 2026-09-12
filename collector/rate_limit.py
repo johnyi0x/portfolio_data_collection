@@ -24,6 +24,7 @@ def info_weight(req_type: str) -> int:
         "exchangeStatus",
     ):
         return WEIGHT_CLEARINGHOUSE
+    # metaAndAssetCtxs, candleSnapshot, fundingHistory are weight 20.
     return WEIGHT_DEFAULT_INFO
 
 

@@ -8,10 +8,12 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .backfill_prices import backfill_prices
 from .config import Settings, load_settings
 from .hl import HyperliquidPublic, load_leaderboard, shortlist_top_roi, snapshot_wallet
 from .index import tally_holds
 from .neon import NeonStore
+from .prices import collect_cycle_prices, coins_from_books_and_index, ctx_dexes
 from .wal import CycleWal
 
 log = logging.getLogger("collector")
@@ -105,6 +107,19 @@ def gather_cycle(
         err = "every wallet snapshot failed"
         log.error(err)
 
+    coins = coins_from_books_and_index(books, index_rows)
+    price_rows: list[dict[str, Any]] = []
+    try:
+        price_rows = collect_cycle_prices(
+            client,
+            cycle_ts=cycle_ts,
+            coins=coins,
+            dexes=ctx_dexes(cfg),
+            now=datetime.now(timezone.utc),
+        )
+    except Exception:
+        log.exception("Price collection failed — storing books without this hour's marks")
+
     finished = time.time()
     return {
         "cycle_ts": cycle_ts.isoformat(),
@@ -124,6 +139,7 @@ def gather_cycle(
         "cohort_members": members,
         "books": books,
         "meta_index": index_rows,
+        "coin_prices": price_rows,
     }
 
 
@@ -188,6 +204,10 @@ def run_forever(cfg: Settings | None = None) -> None:
             key = cycle_key(bucket, cfg.venue)
             neon_status = store.run_status(bucket, cfg.venue)
             if neon_status == "ok":
+                try:
+                    backfill_prices(cfg, client, store)
+                except Exception:
+                    log.exception("Price backfill failed — will retry next loop")
                 sleep_s = seconds_until_next(now, cfg.snapshot_interval_hours)
                 log.info("Hour %s already stored — sleep %.0fs", bucket.isoformat(), sleep_s)
                 time.sleep(sleep_s)
@@ -198,7 +218,16 @@ def run_forever(cfg: Settings | None = None) -> None:
                 log.info("Pushing local WAL for %s (no re-snapshot)", key)
                 push_with_retry(store, existing)
                 wal.mark_synced(key)
+                try:
+                    backfill_prices(cfg, client, store)
+                except Exception:
+                    log.exception("Price backfill failed — will retry next loop")
                 continue
+
+            try:
+                backfill_prices(cfg, client, store, skip_cycle=bucket)
+            except Exception:
+                log.exception("Price backfill failed — gathering this hour anyway")
 
             log.info("Gathering cycle %s", bucket.isoformat())
             payload = gather_cycle(cfg, client, now)
@@ -207,11 +236,11 @@ def run_forever(cfg: Settings | None = None) -> None:
             wal.mark_synced(key)
             wal.prune_synced(keep_days=7)
             sleep_s = seconds_until_next(datetime.now(timezone.utc), cfg.snapshot_interval_hours)
-            log.info(
-                "Cycle done status=%s coverage=%.0f%% coins=%s — sleep %.0fs",
+            log.info("Cycle done status=%s coverage=%.0f%% coins=%s prices=%s — sleep %.0fs",
                 payload["status"],
                 float(payload["coverage"]) * 100.0,
                 len(payload["meta_index"]),
+                len(payload.get("coin_prices") or []),
                 sleep_s,
             )
             time.sleep(sleep_s)

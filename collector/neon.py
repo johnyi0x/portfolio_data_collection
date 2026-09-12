@@ -105,6 +105,36 @@ CREATE TABLE IF NOT EXISTS meta_index (
 
 CREATE INDEX IF NOT EXISTS meta_index_coin_idx
     ON meta_index (venue, coin, cycle_ts DESC);
+
+CREATE TABLE IF NOT EXISTS coin_prices (
+    cycle_ts        timestamptz NOT NULL,
+    venue           text        NOT NULL DEFAULT 'hyperliquid',
+    coin            text        NOT NULL,
+    mark_px         numeric,
+    mid_px          numeric,
+    oracle_px       numeric,
+    funding         numeric,
+    open_interest   numeric,
+    prev_day_px     numeric,
+    day_ntl_vlm     numeric,
+    premium         numeric,
+    ohlc_open       numeric,
+    ohlc_high       numeric,
+    ohlc_low        numeric,
+    ohlc_close      numeric,
+    ohlc_volume     numeric,
+    ohlc_trades     integer,
+    ohlc_start_ts   timestamptz,
+    ohlc_closed     boolean     NOT NULL DEFAULT false,
+    delisted        boolean     NOT NULL DEFAULT false,
+    source          text,
+    error           text,
+    fetched_at      timestamptz NOT NULL,
+    PRIMARY KEY (cycle_ts, venue, coin)
+);
+
+CREATE INDEX IF NOT EXISTS coin_prices_coin_idx
+    ON coin_prices (venue, coin, cycle_ts DESC);
 """
 
 
@@ -335,10 +365,187 @@ class NeonStore:
                         ),
                     )
 
+                # Never DELETE coin_prices here. Old WAL payloads have no prices;
+                # wiping would throw away a backfill. Upsert only rows we have.
+                price_rows = list(payload.get("coin_prices") or [])
+                if price_rows:
+                    _upsert_price_rows(conn, venue, price_rows, default_cycle=cycle_ts)
+
         self.log.info(
-            "Neon wrote cycle %s  books=%s  coins=%s  status=%s",
+            "Neon wrote cycle %s  books=%s  coins=%s  prices=%s  status=%s",
             cycle_ts.isoformat(),
             len(books),
             len(index_rows),
+            len(payload.get("coin_prices") or []),
             payload.get("status"),
+        )
+
+    def upsert_coin_prices(self, venue: str, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        with self.connect() as conn:
+            with conn.transaction():
+                _upsert_price_rows(conn, venue, rows)
+        self.log.info("Neon upserted %s coin_prices rows", len(rows))
+
+    def price_backfill_plan(
+        self,
+        venue: str,
+        now: datetime,
+        *,
+        skip_cycle: datetime | None = None,
+    ) -> list[tuple[datetime, str]]:
+        """Hours that already have a board but are missing a closed 1h bar."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                WITH wanted AS (
+                    SELECT DISTINCT cycle_ts, coin
+                    FROM meta_index
+                    WHERE venue = %s
+                    UNION
+                    SELECT DISTINCT cycle_ts, coin
+                    FROM wallet_positions
+                    WHERE venue = %s
+                )
+                SELECT w.cycle_ts, w.coin
+                FROM wanted w
+                JOIN collector_runs r
+                  ON r.cycle_ts = w.cycle_ts
+                 AND r.venue = %s
+                 AND r.status IN ('ok', 'partial')
+                LEFT JOIN coin_prices p
+                  ON p.cycle_ts = w.cycle_ts
+                 AND p.venue = %s
+                 AND p.coin = w.coin
+                WHERE (%s::timestamptz IS NULL OR w.cycle_ts <> %s)
+                  AND (
+                        p.coin IS NULL
+                        OR p.ohlc_close IS NULL
+                        OR (
+                            p.ohlc_closed = false
+                            AND w.cycle_ts + interval '1 hour' <= %s
+                        )
+                  )
+                ORDER BY w.coin, w.cycle_ts
+                """,
+                (venue, venue, venue, venue, skip_cycle, skip_cycle, now),
+            ).fetchall()
+            conn.commit()
+        out: list[tuple[datetime, str]] = []
+        for row in rows:
+            out.append((_ts(row["cycle_ts"]), str(row["coin"])))
+        return out
+
+
+_UPSERT_PRICES = """
+INSERT INTO coin_prices (
+    cycle_ts, venue, coin,
+    mark_px, mid_px, oracle_px, funding, open_interest,
+    prev_day_px, day_ntl_vlm, premium,
+    ohlc_open, ohlc_high, ohlc_low, ohlc_close, ohlc_volume, ohlc_trades,
+    ohlc_start_ts, ohlc_closed, delisted, source, error, fetched_at
+) VALUES (
+    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+)
+ON CONFLICT (cycle_ts, venue, coin) DO UPDATE SET
+    mark_px = COALESCE(coin_prices.mark_px, EXCLUDED.mark_px),
+    mid_px = COALESCE(coin_prices.mid_px, EXCLUDED.mid_px),
+    oracle_px = COALESCE(coin_prices.oracle_px, EXCLUDED.oracle_px),
+    funding = COALESCE(coin_prices.funding, EXCLUDED.funding),
+    open_interest = COALESCE(coin_prices.open_interest, EXCLUDED.open_interest),
+    prev_day_px = COALESCE(coin_prices.prev_day_px, EXCLUDED.prev_day_px),
+    day_ntl_vlm = COALESCE(coin_prices.day_ntl_vlm, EXCLUDED.day_ntl_vlm),
+    premium = COALESCE(coin_prices.premium, EXCLUDED.premium),
+    ohlc_open = CASE
+        WHEN coin_prices.ohlc_closed THEN coin_prices.ohlc_open
+        ELSE COALESCE(EXCLUDED.ohlc_open, coin_prices.ohlc_open)
+    END,
+    ohlc_high = CASE
+        WHEN coin_prices.ohlc_closed THEN coin_prices.ohlc_high
+        ELSE COALESCE(EXCLUDED.ohlc_high, coin_prices.ohlc_high)
+    END,
+    ohlc_low = CASE
+        WHEN coin_prices.ohlc_closed THEN coin_prices.ohlc_low
+        ELSE COALESCE(EXCLUDED.ohlc_low, coin_prices.ohlc_low)
+    END,
+    ohlc_close = CASE
+        WHEN coin_prices.ohlc_closed THEN coin_prices.ohlc_close
+        ELSE COALESCE(EXCLUDED.ohlc_close, coin_prices.ohlc_close)
+    END,
+    ohlc_volume = CASE
+        WHEN coin_prices.ohlc_closed THEN coin_prices.ohlc_volume
+        ELSE COALESCE(EXCLUDED.ohlc_volume, coin_prices.ohlc_volume)
+    END,
+    ohlc_trades = CASE
+        WHEN coin_prices.ohlc_closed THEN coin_prices.ohlc_trades
+        ELSE COALESCE(EXCLUDED.ohlc_trades, coin_prices.ohlc_trades)
+    END,
+    ohlc_start_ts = CASE
+        WHEN coin_prices.ohlc_closed THEN coin_prices.ohlc_start_ts
+        ELSE COALESCE(EXCLUDED.ohlc_start_ts, coin_prices.ohlc_start_ts)
+    END,
+    ohlc_closed = coin_prices.ohlc_closed OR EXCLUDED.ohlc_closed,
+    delisted = coin_prices.delisted OR EXCLUDED.delisted,
+    source = CASE
+        WHEN coin_prices.source LIKE '%ctx%' THEN coin_prices.source
+        ELSE COALESCE(EXCLUDED.source, coin_prices.source)
+    END,
+    error = CASE
+        WHEN EXCLUDED.ohlc_close IS NOT NULL THEN NULL
+        ELSE COALESCE(EXCLUDED.error, coin_prices.error)
+    END,
+    fetched_at = EXCLUDED.fetched_at
+"""
+
+
+def _opt_ts(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    return _ts(value)
+
+
+def _upsert_price_rows(
+    conn: psycopg.Connection,
+    venue: str,
+    rows: list[dict[str, Any]],
+    *,
+    default_cycle: datetime | None = None,
+) -> None:
+    for row in rows:
+        coin = str(row.get("coin") or "").strip()
+        if not coin:
+            continue
+        cycle = row.get("cycle_ts")
+        cycle_ts = _ts(cycle) if cycle is not None else default_cycle
+        if cycle_ts is None:
+            continue
+        conn.execute(
+            _UPSERT_PRICES,
+            (
+                cycle_ts,
+                venue,
+                coin,
+                row.get("mark_px"),
+                row.get("mid_px"),
+                row.get("oracle_px"),
+                row.get("funding"),
+                row.get("open_interest"),
+                row.get("prev_day_px"),
+                row.get("day_ntl_vlm"),
+                row.get("premium"),
+                row.get("ohlc_open"),
+                row.get("ohlc_high"),
+                row.get("ohlc_low"),
+                row.get("ohlc_close"),
+                row.get("ohlc_volume"),
+                row.get("ohlc_trades"),
+                _opt_ts(row.get("ohlc_start_ts")),
+                bool(row.get("ohlc_closed")),
+                bool(row.get("delisted")),
+                row.get("source") or None,
+                (row.get("error") or None),
+                _ts(row.get("fetched_at") or datetime.now(timezone.utc)),
+            ),
         )

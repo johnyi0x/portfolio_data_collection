@@ -45,6 +45,18 @@ def fnum(v: Any, default: float = 0.0) -> float:
         return default
 
 
+def fopt(v: Any) -> float | None:
+    if v is None or v == "":
+        return None
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return None
+    if n != n:
+        return None
+    return n
+
+
 def coin_key(coin: str, dex: str | None = None) -> str:
     raw = str(coin or "").strip()
     if ":" in raw:
@@ -99,7 +111,7 @@ class HyperliquidPublic:
         self.session = requests.Session()
         self.session.headers.update(
             {
-                "User-Agent": "bagindex-collector/0.1",
+                "User-Agent": "bagrank-collector/0.1",
                 "Accept": "application/json",
             }
         )
@@ -502,3 +514,113 @@ def fetch_user_states(
         except Exception as exc:
             client.log.warning("snapshot dex=%r %s: %s", dex or "native", address[:10], exc)
     return states
+
+
+def fetch_asset_ctx_map(
+    client: HyperliquidPublic,
+    dexes: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Point-in-time mark/funding/OI from metaAndAssetCtxs (native + HIP-3)."""
+    out: dict[str, dict[str, Any]] = {}
+    for dex in dexes:
+        body: dict[str, Any] = {"type": "metaAndAssetCtxs"}
+        if dex:
+            body["dex"] = dex
+        try:
+            raw = client.post_info(body)
+        except Exception as exc:
+            client.log.warning("metaAndAssetCtxs dex=%r failed: %s", dex or "native", exc)
+            continue
+        if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+            continue
+        meta = raw[0] if isinstance(raw[0], dict) else {}
+        ctxs = raw[1] if isinstance(raw[1], list) else []
+        universe = meta.get("universe") or []
+        for i, asset in enumerate(universe):
+            if not isinstance(asset, dict):
+                continue
+            name = str(asset.get("name") or "").strip()
+            if not name:
+                continue
+            key = coin_key(name, dex or None)
+            ctx = ctxs[i] if i < len(ctxs) and isinstance(ctxs[i], dict) else {}
+            out[key] = {
+                "mark_px": fopt(ctx.get("markPx")),
+                "mid_px": fopt(ctx.get("midPx")),
+                "oracle_px": fopt(ctx.get("oraclePx")),
+                "funding": fopt(ctx.get("funding")),
+                "open_interest": fopt(ctx.get("openInterest")),
+                "prev_day_px": fopt(ctx.get("prevDayPx")),
+                "day_ntl_vlm": fopt(ctx.get("dayNtlVlm")),
+                "premium": fopt(ctx.get("premium")),
+                "delisted": bool(asset.get("isDelisted") or asset.get("is_delisted")),
+            }
+    return out
+
+
+def fetch_all_mids_map(
+    client: HyperliquidPublic,
+    dexes: list[str],
+) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for dex in dexes:
+        body: dict[str, Any] = {"type": "allMids"}
+        if dex:
+            body["dex"] = dex
+        try:
+            raw = client.post_info(body)
+        except Exception as exc:
+            client.log.warning("allMids dex=%r failed: %s", dex or "native", exc)
+            continue
+        if not isinstance(raw, dict):
+            continue
+        for name, px in raw.items():
+            val = fopt(px)
+            if val is None:
+                continue
+            out[coin_key(str(name), dex or None)] = val
+    return out
+
+
+def fetch_candles(
+    client: HyperliquidPublic,
+    coin: str,
+    *,
+    start_ms: int,
+    end_ms: int,
+    interval: str = "1h",
+) -> list[dict[str, Any]]:
+    raw = client.post_info(
+        {
+            "type": "candleSnapshot",
+            "req": {
+                "coin": coin,
+                "interval": interval,
+                "startTime": int(start_ms),
+                "endTime": int(end_ms),
+            },
+        }
+    )
+    if not isinstance(raw, list):
+        return []
+    return [c for c in raw if isinstance(c, dict)]
+
+
+def fetch_funding_history(
+    client: HyperliquidPublic,
+    coin: str,
+    *,
+    start_ms: int,
+    end_ms: int | None = None,
+) -> list[dict[str, Any]]:
+    body: dict[str, Any] = {
+        "type": "fundingHistory",
+        "coin": coin,
+        "startTime": int(start_ms),
+    }
+    if end_ms is not None:
+        body["endTime"] = int(end_ms)
+    raw = client.post_info(body)
+    if not isinstance(raw, list):
+        return []
+    return [c for c in raw if isinstance(c, dict)]
