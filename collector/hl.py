@@ -75,6 +75,25 @@ def dex_of(api_coin: str) -> str:
     return ""
 
 
+def hip3_dexes_for_cycle(client: HyperliquidPublic, fallback_csv: str) -> list[str]:
+    """Live HIP-3 dex names for this hour. One perpDexs call. Fallback if that fails."""
+    fallback = [d.strip() for d in fallback_csv.split(",") if d.strip()]
+    try:
+        names = client.fetch_perp_dex_names()
+    except Exception as exc:
+        client.log.warning(
+            "perpDexs failed (%s) — fallback %s",
+            exc,
+            ",".join(fallback) or "none",
+        )
+        return fallback
+    if not names:
+        client.log.warning("perpDexs returned no names — fallback %s", ",".join(fallback) or "none")
+        return fallback
+    client.log.info("HIP-3 dexs this hour: %s", ",".join(names))
+    return names
+
+
 def in_scope(coin: str, dex_scope: str) -> bool:
     scope = (dex_scope or "include").strip().lower()
     dex = dex_of(coin)
@@ -167,15 +186,20 @@ class HyperliquidPublic:
     def fetch_perp_dex_names(self) -> list[str]:
         raw = self.post_info({"type": "perpDexs"})
         names: list[str] = []
+        seen: set[str] = set()
         if not isinstance(raw, list):
             return names
         for item in raw:
+            name = ""
             if isinstance(item, dict):
-                name = item.get("name")
-                if name:
-                    names.append(str(name))
+                name = str(item.get("name") or item.get("dex") or "").strip()
             elif item:
-                names.append(str(item))
+                name = str(item).strip()
+            key = name.lower()
+            if not name or key in seen or key in {"all_dexes", "native"}:
+                continue
+            seen.add(key)
+            names.append(name)
         return names
 
     def fetch_leaderboard_payload(self) -> Any:
@@ -483,7 +507,7 @@ def fetch_user_states(
         try:
             raw = client.post_info(
                 {"type": "clearinghouseState", "user": address, "dex": "ALL_DEXES"},
-                retries=1,
+                retries=2,
             )
             states = iter_clearinghouse_states(raw)
             if states:

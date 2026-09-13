@@ -17,7 +17,7 @@ from .hl import HyperliquidPublic, fetch_all_mids_map, fetch_asset_ctx_map
 from .neon import NeonStore
 from .prices import (
     collect_price_range,
-    ctx_dexes,
+    ctx_dexes_for_coins,
     hour_still_open,
     lookup_mid,
 )
@@ -48,7 +48,7 @@ def backfill_prices(
             live_cycle = cycle_ts
             break
 
-    dexes = ctx_dexes(cfg)
+    dexes = ctx_dexes_for_coins(list(by_coin))
     ctx_map: dict[str, dict[str, Any]] = {}
     if live_cycle is not None:
         try:

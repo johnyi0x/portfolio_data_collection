@@ -10,10 +10,20 @@ from typing import Any
 
 from .backfill_prices import backfill_prices
 from .config import Settings, load_settings
-from .hl import HyperliquidPublic, load_leaderboard, shortlist_top_roi, snapshot_wallet
+from .hl import (
+    HyperliquidPublic,
+    hip3_dexes_for_cycle,
+    load_leaderboard,
+    shortlist_top_roi,
+    snapshot_wallet,
+)
 from .index import tally_holds
 from .neon import NeonStore
-from .prices import collect_cycle_prices, coins_from_books_and_index, ctx_dexes
+from .prices import (
+    coins_from_books_and_index,
+    collect_cycle_prices,
+    ctx_dexes_for_coins,
+)
 from .wal import CycleWal
 
 log = logging.getLogger("collector")
@@ -71,8 +81,7 @@ def gather_cycle(
 
     extra_dexes: list[str] = []
     if cfg.dex_scope != "native":
-        extra_dexes = [d for d in cfg.dex_fallback.split(",") if d.strip()]
-        extra_dexes = [d.strip() for d in extra_dexes]
+        extra_dexes = hip3_dexes_for_cycle(client, cfg.dex_fallback)
     client.all_dexes_ok = True
 
     books: list[dict[str, Any]] = []
@@ -114,7 +123,7 @@ def gather_cycle(
             client,
             cycle_ts=cycle_ts,
             coins=coins,
-            dexes=ctx_dexes(cfg),
+            dexes=ctx_dexes_for_coins(coins),
             now=datetime.now(timezone.utc),
         )
     except Exception:

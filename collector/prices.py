@@ -14,6 +14,7 @@ from typing import Any
 from .config import Settings
 from .hl import (
     HyperliquidPublic,
+    dex_of,
     fetch_all_mids_map,
     fetch_asset_ctx_map,
     fetch_candles,
@@ -35,6 +36,18 @@ def ctx_dexes(cfg: Settings) -> list[str]:
     if scope == "xyz_only":
         return fallback or ["xyz"]
     return [""] + fallback
+
+
+def ctx_dexes_for_coins(coins: list[str]) -> list[str]:
+    """Only fetch mark/ctx for dexs that actually appear in this hour's books."""
+    out: list[str] = [""]
+    seen = {""}
+    for coin in coins:
+        dex = dex_of(coin)
+        if dex and dex not in seen:
+            seen.add(dex)
+            out.append(dex)
+    return out
 
 
 def coins_from_books_and_index(
